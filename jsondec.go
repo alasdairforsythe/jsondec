@@ -421,12 +421,25 @@ type Error struct {
 func (e Error) Error() string {
 	msg := errorMessage(e.Code)
 	if e.Path != "" {
-		return fmt.Sprintf("jsondec: %s at byte %d at path %s", msg, e.Offset, e.Path)
+		if len(e.Field) > 0 {
+			return fmt.Sprintf("jsondec: %s %q at JSON path %s (byte %d)", msg, e.Field, displayPath(e.Path), e.Offset)
+		}
+		return fmt.Sprintf("jsondec: %s at JSON path %s (byte %d)", msg, displayPath(e.Path), e.Offset)
 	}
 	if len(e.Field) > 0 {
-		return fmt.Sprintf("jsondec: %s at byte %d near field %q", msg, e.Offset, e.Field)
+		return fmt.Sprintf("jsondec: %s near field %q (byte %d)", msg, e.Field, e.Offset)
 	}
-	return fmt.Sprintf("jsondec: %s at byte %d", msg, e.Offset)
+	return fmt.Sprintf("jsondec: %s (byte %d)", msg, e.Offset)
+}
+
+func displayPath(path string) string {
+	if path == "" {
+		return "$"
+	}
+	if strings.HasPrefix(path, "[") {
+		return "$" + path
+	}
+	return "$." + path
 }
 
 func errorMessage(c ErrorCode) string {
@@ -1335,6 +1348,7 @@ func (p *parser) decodeStruct(s *schema, base unsafe.Pointer) error {
 	var seen uint64
 	for {
 		p.skipWS()
+		keyOffset := p.i
 		key, err := p.parseKey()
 		if err != nil {
 			return err
@@ -1352,14 +1366,14 @@ func (p *parser) decodeStruct(s *schema, base unsafe.Pointer) error {
 		f := s.lookupField(key)
 		if f == nil {
 			if p.opts.DisallowUnknownFields {
-				return Error{Code: ErrUnknownField, Offset: p.i, Field: key, Path: pathField(key)}
+				return Error{Code: ErrUnknownField, Offset: keyOffset, Field: key, Path: pathField(key)}
 			}
 			if err := p.skipValue(); err != nil {
 				return withPath(err, pathField(key))
 			}
 		} else {
 			if isForbiddenInfo(f.info) {
-				return Error{Code: ErrForbiddenField, Offset: p.i, Field: f.name, Path: pathField(f.name)}
+				return Error{Code: ErrForbiddenField, Offset: keyOffset, Field: f.name, Path: pathField(f.name)}
 			}
 			fieldPtr := unsafe.Add(base, f.offset)
 			if f.decode != nil {
