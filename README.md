@@ -16,7 +16,7 @@ jsondec is a Go JSON decoding library built around a registration pattern: you c
 
 **No structural limits.** You cannot reject a payload that is too large, too deeply nested, or has too many fields. This is a security concern when decoding untrusted input.
 
-**No forbidden fields.** You cannot declare that a particular key must never appear, which matters for deprecated or privileged fields.
+**No forbidden fields.** You cannot declare that a particular key must never appear, which matters for privileged fields.
 
 **`[]byte` decodes from base64.** In `encoding/json`, a `[]byte` field expects a base64-encoded JSON string — `"aGVsbG8="` becomes `[]byte("hello")`. In jsondec, `[]byte` stores the raw string bytes — `"aGVsbG8="` becomes `[]byte("aGVsbG8=")`. This is a silent data corruption risk when migrating. If you need base64 decoding, use a `string` field and decode it explicitly.
 
