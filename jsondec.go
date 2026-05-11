@@ -31,6 +31,7 @@ package jsondec
 
 import (
 	"encoding"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -610,6 +611,7 @@ type schema struct {
 	fields       []fieldMeta
 	table        []hashEntry
 	smallLookup  []smallLookupEntry
+	smallIndex   []int
 	requiredMask uint64
 	resetFields  []int
 }
@@ -627,7 +629,7 @@ var (
 	rawUnionType   = reflect.TypeOf(RawUnion{})
 	presentType    = reflect.TypeOf(Present{})
 	forbiddenType  = reflect.TypeOf(Forbidden{})
-	jsondecPkgPath   = rawValueType.PkgPath()
+	jsondecPkgPath = rawValueType.PkgPath()
 
 	jsonUnmarshalerType = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
 	textUnmarshalerType = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
@@ -822,7 +824,7 @@ func compileSpecialjsondecType(t reflect.Type) (*typeInfo, bool, error) {
 			typ:         t,
 			bytesOffset: bytesField.Offset,
 			kindOffset:  kindField.Offset,
-			zero:        makeZeroer(t),
+			zero:        makeRawUnionZeroer(bytesField.Offset, kindField.Offset),
 		}, true, nil
 	}
 	if t == presentType {
@@ -833,7 +835,7 @@ func compileSpecialjsondecType(t reflect.Type) (*typeInfo, bool, error) {
 			typ:           t,
 			presentOffset: presentField.Offset,
 			nullOffset:    nullField.Offset,
-			zero:          makeZeroer(t),
+			zero:          makePresentZeroer(presentField.Offset, nullField.Offset),
 		}, true, nil
 	}
 	if t == forbiddenType {
@@ -975,7 +977,28 @@ func compileRawType(t reflect.Type, k kind) *typeInfo {
 		typ:           t,
 		bytesOffset:   bytesField.Offset,
 		presentOffset: presentField.Offset,
-		zero:          makeZeroer(t),
+		zero:          makeRawZeroer(bytesField.Offset, presentField.Offset),
+	}
+}
+
+func makeRawZeroer(bytesOffset, presentOffset uintptr) func(unsafe.Pointer) {
+	return func(ptr unsafe.Pointer) {
+		*(*[]byte)(unsafe.Add(ptr, bytesOffset)) = nil
+		*(*bool)(unsafe.Add(ptr, presentOffset)) = false
+	}
+}
+
+func makePresentZeroer(presentOffset, nullOffset uintptr) func(unsafe.Pointer) {
+	return func(ptr unsafe.Pointer) {
+		*(*bool)(unsafe.Add(ptr, presentOffset)) = false
+		*(*bool)(unsafe.Add(ptr, nullOffset)) = false
+	}
+}
+
+func makeRawUnionZeroer(bytesOffset, kindOffset uintptr) func(unsafe.Pointer) {
+	return func(ptr unsafe.Pointer) {
+		*(*[]byte)(unsafe.Add(ptr, bytesOffset)) = nil
+		*(*JSONKind)(unsafe.Add(ptr, kindOffset)) = KindInvalid
 	}
 }
 
@@ -1109,6 +1132,22 @@ func (s *schema) buildSmallLookup() {
 			s.smallLookup = append(s.smallLookup, smallLookupEntry{sig: sig, indices: []int{i}})
 		}
 	}
+	if len(s.smallLookup) == 0 {
+		return
+	}
+	n := 1
+	for n < len(s.smallLookup)*2 {
+		n <<= 1
+	}
+	s.smallIndex = make([]int, n)
+	mask := uint32(n - 1)
+	for i := range s.smallLookup {
+		pos := int(s.smallLookup[i].sig & mask)
+		for s.smallIndex[pos] != 0 {
+			pos = (pos + 1) & int(mask)
+		}
+		s.smallIndex[pos] = i + 1
+	}
 }
 
 func keySignature(key []byte) uint32 {
@@ -1121,6 +1160,27 @@ func keySignature(key []byte) uint32 {
 func (s *schema) lookupField(key []byte) *fieldMeta {
 	if len(s.smallLookup) > 0 {
 		sig := keySignature(key)
+		if len(s.smallIndex) > 0 {
+			mask := uint32(len(s.smallIndex) - 1)
+			pos := int(sig & mask)
+			for {
+				slot := s.smallIndex[pos]
+				if slot == 0 {
+					return nil
+				}
+				e := &s.smallLookup[slot-1]
+				if e.sig == sig {
+					for _, idx := range e.indices {
+						f := &s.fields[idx]
+						if bytesEqual(f.name, key) {
+							return f
+						}
+					}
+					return nil
+				}
+				pos = (pos + 1) & int(mask)
+			}
+		}
 		for i := range s.smallLookup {
 			e := &s.smallLookup[i]
 			if e.sig != sig {
@@ -1196,9 +1256,32 @@ var escapeASCII = func() (a [256]uint8) {
 // compiler will inline it into its callers; this matches the design of
 // encoding/json/v2's jsonwire.ConsumeSimpleString and is what closes most
 // of the gap on string-heavy payloads.
+const (
+	wordLoBits      uint64 = 0x0101010101010101
+	wordHiBits      uint64 = 0x8080808080808080
+	wordQuoteBits   uint64 = 0x2222222222222222
+	wordSlashBits   uint64 = 0x5c5c5c5c5c5c5c5c
+	wordControlBits uint64 = 0x2020202020202020
+)
+
+func wordHasZeroByte(x uint64) bool {
+	return ((x - wordLoBits) & ^x & wordHiBits) != 0
+}
+
+func wordHasControlByte(x uint64) bool {
+	return ((x - wordControlBits) & ^x & wordHiBits) != 0
+}
+
 func consumeSimpleString(b []byte) (n int) {
 	if len(b) > 0 && b[0] == '"' {
 		n++
+		for len(b)-n >= 8 {
+			x := binary.LittleEndian.Uint64(b[n:])
+			if (x&wordHiBits) != 0 || wordHasControlByte(x) || wordHasZeroByte(x^wordQuoteBits) || wordHasZeroByte(x^wordSlashBits) {
+				break
+			}
+			n += 8
+		}
 		for uint(len(b)) > uint(n) && escapeASCII[b[n]] == 0 {
 			n++
 		}
@@ -2490,6 +2573,22 @@ func (p *parser) tryNull() bool {
 	return false
 }
 
+func (p *parser) tryTrue() bool {
+	if p.i+4 <= p.n && p.buf[p.i] == 't' && p.buf[p.i+1] == 'r' && p.buf[p.i+2] == 'u' && p.buf[p.i+3] == 'e' {
+		p.i += 4
+		return true
+	}
+	return false
+}
+
+func (p *parser) tryFalse() bool {
+	if p.i+5 <= p.n && p.buf[p.i] == 'f' && p.buf[p.i+1] == 'a' && p.buf[p.i+2] == 'l' && p.buf[p.i+3] == 's' && p.buf[p.i+4] == 'e' {
+		p.i += 5
+		return true
+	}
+	return false
+}
+
 func (p *parser) parseInt64Bits(bits int) (int64, error) {
 	if p.i >= p.n {
 		return 0, Error{Code: ErrUnexpectedEOF, Offset: p.i}
@@ -2872,33 +2971,150 @@ func (p *parser) skipValue() error {
 
 func (p *parser) skipValueNoLimit() error {
 	p.skipWS()
+	return p.skipValueNoLimitAtValue()
+}
+
+type skipFrame struct {
+	typ   byte
+	mode  byte
+	first bool
+}
+
+const (
+	skipObjectKey byte = iota
+	skipObjectEnd
+	skipArrayValue
+	skipArrayEnd
+)
+
+func (p *parser) skipValueNoLimitAtValue() error {
+	if p.i >= p.n {
+		return Error{Code: ErrUnexpectedEOF, Offset: p.i}
+	}
+	var local [32]skipFrame
+	stack := local[:0]
+
+consumeValue:
 	if p.i >= p.n {
 		return Error{Code: ErrUnexpectedEOF, Offset: p.i}
 	}
 	switch p.buf[p.i] {
 	case '{':
-		return p.skipObject()
+		p.i++
+		stack = append(stack, skipFrame{typ: '{', mode: skipObjectKey, first: true})
+		goto nextFrame
 	case '[':
-		return p.skipArray()
+		p.i++
+		stack = append(stack, skipFrame{typ: '[', mode: skipArrayValue, first: true})
+		goto nextFrame
 	case '"':
-		return p.skipString()
-	case 't':
-		_, err := p.parseBoolOrNull(false)
-		return err
-	case 'f':
-		_, err := p.parseBoolOrNull(false)
-		return err
-	case 'n':
-		if p.tryNull() {
-			return nil
+		if err := p.skipString(); err != nil {
+			return err
 		}
-		return Error{Code: ErrInvalidNull, Offset: p.i}
+	case 't':
+		if !p.tryTrue() {
+			return Error{Code: ErrInvalidLiteral, Offset: p.i}
+		}
+	case 'f':
+		if !p.tryFalse() {
+			return Error{Code: ErrInvalidLiteral, Offset: p.i}
+		}
+	case 'n':
+		if !p.tryNull() {
+			return Error{Code: ErrInvalidNull, Offset: p.i}
+		}
 	default:
 		if p.buf[p.i] == '-' || (p.buf[p.i] >= '0' && p.buf[p.i] <= '9') {
-			return p.skipNumber()
+			if err := p.skipNumber(); err != nil {
+				return err
+			}
+		} else {
+			return Error{Code: ErrInvalidLiteral, Offset: p.i}
 		}
-		return Error{Code: ErrInvalidLiteral, Offset: p.i}
 	}
+	if len(stack) == 0 {
+		return nil
+	}
+
+nextFrame:
+	for len(stack) > 0 {
+		top := &stack[len(stack)-1]
+		switch top.mode {
+		case skipObjectKey:
+			p.skipWS()
+			if p.i >= p.n {
+				return Error{Code: ErrUnexpectedEOF, Offset: p.i}
+			}
+			if top.first && p.buf[p.i] == '}' {
+				p.i++
+				stack = stack[:len(stack)-1]
+				continue
+			}
+			if err := p.skipString(); err != nil {
+				return err
+			}
+			p.skipWS()
+			if p.i >= p.n {
+				return Error{Code: ErrUnexpectedEOF, Offset: p.i}
+			}
+			if p.buf[p.i] != ':' {
+				return Error{Code: ErrExpectedColon, Offset: p.i}
+			}
+			p.i++
+			p.skipWS()
+			top.mode = skipObjectEnd
+			top.first = false
+			goto consumeValue
+		case skipObjectEnd:
+			p.skipWS()
+			if p.i >= p.n {
+				return Error{Code: ErrUnexpectedEOF, Offset: p.i}
+			}
+			switch p.buf[p.i] {
+			case ',':
+				p.i++
+				top.mode = skipObjectKey
+				continue
+			case '}':
+				p.i++
+				stack = stack[:len(stack)-1]
+				continue
+			default:
+				return Error{Code: ErrExpectedCommaOrEnd, Offset: p.i}
+			}
+		case skipArrayValue:
+			p.skipWS()
+			if p.i >= p.n {
+				return Error{Code: ErrUnexpectedEOF, Offset: p.i}
+			}
+			if top.first && p.buf[p.i] == ']' {
+				p.i++
+				stack = stack[:len(stack)-1]
+				continue
+			}
+			top.mode = skipArrayEnd
+			top.first = false
+			goto consumeValue
+		case skipArrayEnd:
+			p.skipWS()
+			if p.i >= p.n {
+				return Error{Code: ErrUnexpectedEOF, Offset: p.i}
+			}
+			switch p.buf[p.i] {
+			case ',':
+				p.i++
+				top.mode = skipArrayValue
+				continue
+			case ']':
+				p.i++
+				stack = stack[:len(stack)-1]
+				continue
+			default:
+				return Error{Code: ErrExpectedCommaOrEnd, Offset: p.i}
+			}
+		}
+	}
+	return nil
 }
 
 func (p *parser) skipObject() error {
@@ -3163,9 +3379,6 @@ func (p *parser) decodeSlice(ti *typeInfo, ptr unsafe.Pointer) error {
 		return Error{Code: ErrExpectedArray, Offset: p.i}
 	}
 
-	// For repeated decodes into an existing destination, primitive slices can be
-	// decoded in one pass into the current backing array. Fresh or zero-capacity
-	// slices keep the count-first path so they still get exact allocation.
 	if isPrimitiveSliceFastKind(ti.elem.kind) {
 		sh := (*reflect.SliceHeader)(ptr)
 		if sh.Cap > 0 {
@@ -3173,16 +3386,17 @@ func (p *parser) decodeSlice(ti *typeInfo, ptr unsafe.Pointer) error {
 				return err
 			}
 		}
+		count, err := p.countArrayElements()
+		if err != nil {
+			return err
+		}
+		if handled, err := p.decodePrimitiveSliceKnownCount(ti, ptr, count); handled {
+			return err
+		}
+		return p.decodeSliceKnownCount(ti, ptr, count)
 	}
 
-	count, err := p.countArrayElements()
-	if err != nil {
-		return err
-	}
-	if handled, err := p.decodePrimitiveSliceKnownCount(ti, ptr, count); handled {
-		return err
-	}
-	return p.decodeSliceKnownCount(ti, ptr, count)
+	return p.decodeCompositeSliceAppend(ti, ptr)
 }
 
 func isPrimitiveSliceFastKind(k kind) bool {
@@ -3195,6 +3409,54 @@ func isPrimitiveSliceFastKind(k kind) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func (p *parser) decodeCompositeSliceAppend(ti *typeInfo, ptr unsafe.Pointer) error {
+	if p.buf[p.i] != '[' {
+		return Error{Code: ErrExpectedArray, Offset: p.i}
+	}
+	p.i++
+	p.skipWS()
+	if p.i < p.n && p.buf[p.i] == ']' {
+		p.i++
+		sh := (*reflect.SliceHeader)(ptr)
+		sh.Len = 0
+		return nil
+	}
+
+	dst := reflect.NewAt(ti.typ, ptr).Elem()
+	if dst.IsNil() || dst.Cap() == 0 {
+		dst.Set(reflect.MakeSlice(ti.typ, 0, 4))
+	} else {
+		dst.SetLen(0)
+	}
+	elemSize := ti.typ.Elem().Size()
+	idx := 0
+	for {
+		if idx == dst.Cap() {
+			newCap := dst.Cap() * 2
+			if newCap == 0 {
+				newCap = 4
+			}
+			grown := reflect.MakeSlice(ti.typ, dst.Len(), newCap)
+			reflect.Copy(grown, dst)
+			dst.Set(grown)
+		}
+		dst.SetLen(idx + 1)
+		base := unsafe.Pointer(dst.Pointer())
+		elemPtr := unsafe.Add(base, uintptr(idx)*elemSize)
+		if err := p.decodeInto(ti.elem, elemPtr); err != nil {
+			return withPath(err, pathIndex(idx))
+		}
+		idx++
+		done, err := p.consumeArrayAppendEnd()
+		if err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
 	}
 }
 
@@ -4337,25 +4599,20 @@ func (p *parser) decodeMap(ti *typeInfo, ptr unsafe.Pointer) error {
 	if p.i >= p.n || p.buf[p.i] != '{' {
 		return Error{Code: ErrExpectedObject, Offset: p.i}
 	}
-	count, err := p.countObjectMembers()
-	if err != nil {
-		return err
-	}
 	if mv.IsNil() {
-		mv.Set(reflect.MakeMapWithSize(ti.typ, count))
+		mv.Set(reflect.MakeMap(ti.typ))
+	} else {
+		mv.Clear()
 	}
 	p.i++
 	p.skipWS()
-	if count == 0 {
-		if p.i >= p.n || p.buf[p.i] != '}' {
-			return Error{Code: ErrExpectedCommaOrEnd, Offset: p.i}
-		}
+	if p.i < p.n && p.buf[p.i] == '}' {
 		p.i++
 		return nil
 	}
 	keyType := ti.typ.Key()
 	valType := ti.typ.Elem()
-	for idx := 0; idx < count; idx++ {
+	for {
 		keyBytes, err := p.parseKey()
 		if err != nil {
 			return err
@@ -4378,24 +4635,14 @@ func (p *parser) decodeMap(ti *typeInfo, ptr unsafe.Pointer) error {
 		}
 		mv.SetMapIndex(key, val.Elem())
 
-		p.skipWS()
-		if p.i >= p.n {
-			return Error{Code: ErrUnexpectedEOF, Offset: p.i}
+		done, err := p.consumeObjectAppendEnd()
+		if err != nil {
+			return err
 		}
-		if idx == count-1 {
-			if p.buf[p.i] != '}' {
-				return Error{Code: ErrExpectedCommaOrEnd, Offset: p.i}
-			}
-			p.i++
+		if done {
 			return nil
 		}
-		if p.buf[p.i] != ',' {
-			return Error{Code: ErrExpectedCommaOrEnd, Offset: p.i}
-		}
-		p.i++
-		p.skipWS()
 	}
-	return nil
 }
 
 func (p *parser) decodeTypedStringMap(ti *typeInfo, ptr unsafe.Pointer) (bool, error) {
@@ -4446,11 +4693,9 @@ func (p *parser) decodeMapStringString(ptr unsafe.Pointer) error {
 	}
 	m := *mp
 	if m == nil {
-		count, err := p.countObjectMembers()
-		if err != nil {
-			return err
-		}
-		m = make(map[string]string, count)
+		m = make(map[string]string)
+	} else {
+		clear(m)
 	}
 	p.i++
 	p.skipWS()
@@ -4500,11 +4745,9 @@ func (p *parser) decodeMapStringInt(ptr unsafe.Pointer) error {
 	}
 	m := *mp
 	if m == nil {
-		count, err := p.countObjectMembers()
-		if err != nil {
-			return err
-		}
-		m = make(map[string]int, count)
+		m = make(map[string]int)
+	} else {
+		clear(m)
 	}
 	p.i++
 	p.skipWS()
@@ -4554,11 +4797,9 @@ func (p *parser) decodeMapStringInt64(ptr unsafe.Pointer) error {
 	}
 	m := *mp
 	if m == nil {
-		count, err := p.countObjectMembers()
-		if err != nil {
-			return err
-		}
-		m = make(map[string]int64, count)
+		m = make(map[string]int64)
+	} else {
+		clear(m)
 	}
 	p.i++
 	p.skipWS()
@@ -4608,11 +4849,9 @@ func (p *parser) decodeMapStringUint64(ptr unsafe.Pointer) error {
 	}
 	m := *mp
 	if m == nil {
-		count, err := p.countObjectMembers()
-		if err != nil {
-			return err
-		}
-		m = make(map[string]uint64, count)
+		m = make(map[string]uint64)
+	} else {
+		clear(m)
 	}
 	p.i++
 	p.skipWS()
@@ -4662,11 +4901,9 @@ func (p *parser) decodeMapStringFloat64(ptr unsafe.Pointer) error {
 	}
 	m := *mp
 	if m == nil {
-		count, err := p.countObjectMembers()
-		if err != nil {
-			return err
-		}
-		m = make(map[string]float64, count)
+		m = make(map[string]float64)
+	} else {
+		clear(m)
 	}
 	p.i++
 	p.skipWS()
@@ -4716,11 +4953,9 @@ func (p *parser) decodeMapStringBool(ptr unsafe.Pointer) error {
 	}
 	m := *mp
 	if m == nil {
-		count, err := p.countObjectMembers()
-		if err != nil {
-			return err
-		}
-		m = make(map[string]bool, count)
+		m = make(map[string]bool)
+	} else {
+		clear(m)
 	}
 	p.i++
 	p.skipWS()
