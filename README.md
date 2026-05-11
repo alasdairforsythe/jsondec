@@ -24,26 +24,6 @@ jsondec solves all of the above with struct tags and typed field declarations, a
 
 ---
 
-## Benchmarks
-
-Benchmarks run on Linux/amd64, Intel Xeon Platinum 8370C @ 2.80GHz, 20 runs each, using `benchstat`.
-
-The jsondec default configuration has `ReuseInputBuffer=false`, which means it explicitly makes a copy of the input.
-
-### Default configuration vs other decoders
-
-Each cell: ns/op · B/op · allocs/op. All lower is better.
-
-| Shape | jsondec | encoding/json | encoding/json/v2 | goccy/go-json |
-|---|---|---|---|---|
-| Small flat object | 520 ns · 288 B · 3 allocs | 1357 ns · 64 B · 1 alloc | 1035 ns · 64 B · 1 alloc | 435 ns · 160 B · 2 allocs |
-| Nested catalog | 3943 ns · 1224 B · 9 allocs | 7984 ns · 1032 B · 19 allocs | 6715 ns · 1032 B · 19 allocs | 3057 ns · 1488 B · 21 allocs |
-| Numeric telemetry | 3310 ns · 784 B · 5 allocs | 7321 ns · 832 B · 12 allocs | 6299 ns · 832 B · 12 allocs | 3520 ns · 976 B · 44 allocs |
-| OpenAI request (escaped) | 43064 ns · 17368 B · 71 allocs | 53632 ns · 17690 B · 72 allocs | 45020 ns · 17690 B · 72 allocs | 31374 ns · 17879 B · 105 allocs |
-| OpenAI request (no escape) | 33513 ns · 17368 B · 71 allocs | 43872 ns · 14106 B · 70 allocs | 36625 ns · 14107 B · 70 allocs | 26956 ns · 17879 B · 105 allocs |
-
----
-
 ## Install
 
 ```
@@ -86,69 +66,20 @@ Both functions panic with `CompileError` at startup if `T` contains an unsupport
 
 ## Performance
 
-Benchmarks were run on Linux, `amd64`, Intel Xeon Platinum 8370C @ 2.80GHz, `GOEXPERIMENT=jsonv2`, 20 runs per configuration via `benchstat`. Full raw output and benchstat summary are in `docs/`.
+Benchmarks run on Linux/amd64, Intel Xeon @ 2.80GHz.
 
-**Benchmark shapes:**
+Each cell: ns/op · MB/s · allocs/op. Lower ns/op and allocs/op are better; higher MB/s is better.
 
-- **Small flat object** — a single struct with a handful of primitive fields
-- **Nested catalog** — structs with nested struct fields
-- **Numeric telemetry** — a struct with many numeric fields and few strings
-- **OpenAI API request (escaped)** — a real-world API payload where content fields contain `\n` escape sequences
-- **OpenAI API request (no escape)** — the same payload with literal newlines instead of escape sequences
-
-The jsondec results shown below use `ReuseInputBuffer=false` (the default), which copies the input once before decoding so that decoded strings and byte slices remain valid after the caller releases the buffer.
-
-### Time (ns/op, lower is better)
-
-| JSON shape | jsondec | encoding/json | encoding/json/v2 | goccy/go-json |
+| Benchmark | jsondec | goccy/go-json | encoding/json/v2 | encoding/json |
 |---|---:|---:|---:|---:|
-| Small flat object | 520 | 1357 | 1035 | 435 |
-| Nested catalog | 3943 | 7984 | 6715 | 3057 |
-| Numeric telemetry | 3310 | 7321 | 6299 | 3520 |
-| OpenAI API request (escaped) | 43064 | 53632 | 45020 | 31374 |
-| OpenAI API request (no escape) | 33513 | 43872 | 36625 | 26956 |
+| UserProfile (858 B) | 3,793 · 242 · 3 | 2,856 · 314 · 7 | 6,539 · 137 · 13 | 13,560 · 66 · 34 |
+| LogEntry (817 B) | 2,892 · 283 · 4 | 3,333 · 245 · 15 | 5,859 · 139 · 6 | 13,135 · 62 · 40 |
+| Order (1,845 B) | 6,921 · 267 · 4 | 6,238 · 298 · 5 | 12,458 · 148 · 13 | 28,459 · 65 · 47 |
+| GitHubEvent (2,584 B) | 9,913 · 261 · 8 | 8,709 · 297 · 18 | 19,029 · 136 · 49 | 37,877 · 68 · 86 |
+| Config (454 B) | 2,131 · 213 · 3 | 1,945 · 234 · 6 | 3,703 · 123 · 11 | 6,892 · 66 · 21 |
+| OpenAPI (8,836 B) | 76,042 · 116 · 256 | 62,325 · 142 · 300 | 111,857 · 79 · 308 | 188,266 · 47 · 488 |
 
-### Allocated bytes (B/op, lower is better)
-
-| JSON shape | jsondec | encoding/json | encoding/json/v2 | goccy/go-json |
-|---|---:|---:|---:|---:|
-| Small flat object | 288 | 64 | 64 | 160 |
-| Nested catalog | 1224 | 1032 | 1032 | 1488 |
-| Numeric telemetry | 784 | 832 | 832 | 976 |
-| OpenAI API request (escaped) | 17368 | 17690 | 17690 | 17879 |
-| OpenAI API request (no escape) | 17368 | 14106 | 14107 | 17879 |
-
-### Allocations (allocs/op, lower is better)
-
-| JSON shape | jsondec | encoding/json | encoding/json/v2 | goccy/go-json |
-|---|---:|---:|---:|---:|
-| Small flat object | 3 | 1 | 1 | 2 |
-| Nested catalog | 9 | 19 | 19 | 21 |
-| Numeric telemetry | 5 | 12 | 12 | 44 |
-| OpenAI API request (escaped) | 71 | 72 | 72 | 105 |
-| OpenAI API request (no escape) | 71 | 70 | 70 | 105 |
-
-**What these numbers mean:**
-
-On CPU time, jsondec is 2–2.3x faster than `encoding/json` and 1.6–1.9x faster than `encoding/json/v2` across most workloads. `goccy/go-json` is faster on string-heavy payloads where escape processing dominates; jsondec is faster on numeric-heavy ones.
-
-On allocations, jsondec reduces heap pressure significantly versus both standard library options. The numeric telemetry shape makes this most visible: jsondec makes 5 allocations where goccy makes 44, and `encoding/json` makes 12.
-
-jsondec allocates more bytes than `encoding/json` on some shapes because of the input copy that `ReuseInputBuffer=false` makes. The small flat object goes from 64 B to 288 B. This tradeoff is intentional — the copy is what makes it safe to decode into a struct and then release the original buffer. `ReuseInputBuffer=true` eliminates this cost when you can manage the buffer lifetime yourself.
-
-### With ReuseInputBuffer
-
-When the input buffer is prepared outside the timed section — the realistic pattern for a server that owns the input buffer lifecycle and can manage its lifetime — jsondec with `ReuseInputBuffer=true` reaches:
-
-| JSON shape | jsondec (ReuseInputBuffer) | encoding/json | goccy/go-json |
-|---|---:|---:|---:|
-| Small flat object | 481 ns, 192 B, 2 allocs | 1357 ns, 64 B, 1 alloc | 435 ns, 160 B, 2 allocs |
-| Nested catalog | 4003 ns, 648 B, 8 allocs | 7984 ns, 1032 B, 19 allocs | 3057 ns, 1488 B, 21 allocs |
-| Numeric telemetry | 3223 ns, 528 B, 4 allocs | 7321 ns, 832 B, 12 allocs | 3520 ns, 976 B, 44 allocs |
-| OpenAI API request (escaped) | 41732 ns, 10584 B, 70 allocs | 53632 ns, 17690 B, 72 allocs | 31374 ns, 17879 B, 105 allocs |
-| OpenAI API request (no escape) | 29593 ns, 10584 B, 70 allocs | 43872 ns, 14106 B, 70 allocs | 26956 ns, 17879 B, 105 allocs |
-
-The no-escape OpenAI result uses the shared raw variant, where the same unescaped input buffer is decoded repeatedly without restoration between calls. This is the ceiling of what jsondec can achieve on a large string-heavy payload: 29.6µs versus `encoding/json`'s 43.9µs and goccy's 27.0µs.
+jsondec is about 2.5x–4.5x faster than `encoding/json` and about 1.5x–2.0x faster than `encoding/json/v2` on these fixtures. Against `goccy/go-json`, jsondec is faster on the map-heavy LogEntry fixture and slower on most struct-heavy fixtures, while generally using fewer allocations.
 
 ---
 
