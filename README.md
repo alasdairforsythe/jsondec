@@ -72,12 +72,12 @@ Each cell: ns/op · MB/s · allocs/op. Lower ns/op and allocs/op are better; hig
 
 | Benchmark | jsondec | goccy/go-json | encoding/json/v2 | encoding/json |
 |---|---:|---:|---:|---:|
-| UserProfile (858 B) | 3,793 ns · 242 MB/s · 3 allocs | 2,856 ns · 314 MB/s · 7 allocs | 6,539 ns · 137 MB/s · 13 allocs | 13,560 ns · 66 MB/s · 34 allocs |
-| LogEntry (817 B) | 2,892 ns · 283 MB/s · 4 allocs | 3,333 ns · 245 MB/s · 15 allocs | 5,859 ns · 139 MB/s · 6 allocs | 13,135 ns · 62 MB/s · 40 allocs |
-| Order (1,845 B) | 6,921 ns · 267 MB/s · 4 allocs | 6,238 ns · 298 MB/s · 5 allocs | 12,458 ns · 148 MB/s · 13 allocs | 28,459 ns · 65 MB/s · 47 allocs |
-| GitHubEvent (2,584 B) | 9,913 ns · 261 MB/s · 8 allocs | 8,709 ns · 297 MB/s · 18 allocs | 19,029 ns · 136 MB/s · 49 allocs | 37,877 ns · 68 MB/s · 86 allocs |
-| Config (454 B) | 2,131 ns · 213 MB/s · 3 allocs | 1,945 ns · 234 MB/s · 6 allocs | 3,703 ns · 123 MB/s · 11 allocs | 6,892 ns · 66 MB/s · 21 allocs |
-| OpenAPI (8,836 B) | 76,042 ns · 116 MB/s · 256 allocs | 62,325 ns · 142 MB/s · 300 allocs | 111,857 ns · 79 MB/s · 308 allocs | 188,266 ns · 47 MB/s · 488 allocs |
+| UserProfile (858 B) | 3,793 · 242 · 3 | 2,856 · 314 · 7 | 6,539 · 137 · 13 | 13,560 · 66 · 34 |
+| LogEntry (817 B) | 2,892 · 283 · 4 | 3,333 · 245 · 15 | 5,859 · 139 · 6 | 13,135 · 62 · 40 |
+| Order (1,845 B) | 6,921 · 267 · 4 | 6,238 · 298 · 5 | 12,458 · 148 · 13 | 28,459 · 65 · 47 |
+| GitHubEvent (2,584 B) | 9,913 · 261 · 8 | 8,709 · 297 · 18 | 19,029 · 136 · 49 | 37,877 · 68 · 86 |
+| Config (454 B) | 2,131 · 213 · 3 | 1,945 · 234 · 6 | 3,703 · 123 · 11 | 6,892 · 66 · 21 |
+| OpenAPI (8,836 B) | 76,042 · 116 · 256 | 62,325 · 142 · 300 | 111,857 · 79 · 308 | 188,266 · 47 · 488 |
 
 jsondec is about 2.5x–4.5x faster than `encoding/json` and about 1.5x–2.0x faster than `encoding/json/v2` on these fixtures. Against `goccy/go-json`, jsondec is faster on the map-heavy LogEntry fixture and slower on most struct-heavy fixtures, while generally using fewer allocations.
 
